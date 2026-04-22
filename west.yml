@@ -1,0 +1,42 @@
+# Copyright (c) 2026 Linaro, LTD
+# SPDX-License-Identifier: Apache-2.0
+#
+# West manifest for the roz-workshop (Rust on Zephyr, RustWeek 2026).
+#
+# This repo is the west workspace-application: after cloning, run
+#   west init -l .
+#   west update
+# from the repo root. Zephyr and its modules will be fetched as
+# siblings of the exercise directories and ignored by git.
+#
+# Pinning policy:
+#   - Zephyr is pinned to the v4.1.0 release tag.
+#   - zephyr-lang-rust tracks upstream `devel` for now. About one week
+#     before the workshop (target 2026-05-18) this revision will be
+#     replaced with a fixed SHA for day-of reproducibility.
+#
+# Why the import name-blocklist:
+#   Zephyr v4.1.0 declares zephyr-lang-rust in submanifests/optional.yaml
+#   pinned to a specific SHA, in the `optional` group (which Zephyr's own
+#   group-filter excludes). We block that entry from the import so our
+#   top-level entry — which has no group and so is pulled by default —
+#   stands without a name collision.
+
+manifest:
+  remotes:
+    - name: upstream
+      url-base: https://github.com/zephyrproject-rtos
+
+  defaults:
+    remote: upstream
+
+  projects:
+    - name: zephyr
+      revision: v4.1.0
+      import:
+        name-blocklist:
+          - zephyr-lang-rust
+
+    - name: zephyr-lang-rust
+      revision: devel
+      path: modules/lang/rust

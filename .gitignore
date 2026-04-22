@@ -1,0 +1,17 @@
+# Copyright (c) 2026 Linaro, LTD
+# SPDX-License-Identifier: Apache-2.0
+
+# Build artifacts
+build/
+build-*/
+
+# Cargo
+target/
+
+# Per-exercise cargo config — symlinked per build directory (see common/README.md)
+**/.cargo/config.toml
+
+# Editor / OS junk
+.DS_Store
+.vscode/
+.idea/

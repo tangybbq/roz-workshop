@@ -1,3 +1,8 @@
+<!--
+Copyright (c) 2026 Linaro, LTD
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Workshop Repo Scaffold — Instructions for Claude Code
 
 ## Context
@@ -11,24 +16,25 @@ You are scaffolding a GitHub repo for a 5-hour workshop titled **Rust on Zephyr*
 
 This is the **scaffold pass only**. You are creating the skeleton that subsequent per-exercise instruction docs will fill in. Do **not** write exercise code in this pass.
 
-## Repo pattern: self-contained Zephyr workspace-application
+## Repo pattern: freestanding application (T2 topology)
 
-The repo is a **workspace-application**: the repo root itself is the west workspace. Participants clone the repo, then:
+The repo is a **freestanding application** — Zephyr's "T2: star topology, application is the manifest repo" pattern. The repo is the manifest project; the **west workspace is its parent directory**. Participants make a workspace dir, clone the repo into it, then init and update from the workspace:
 
 ```
-cd roz-workshop
-west init -l .
+mkdir roz-ws && cd roz-ws
+git clone https://github.com/tangybbq/roz-workshop.git
+west init -l roz-workshop
 west update
 ```
 
-After `west update`, Zephyr and modules live as siblings/subdirs inside the repo root, managed by west and excluded from git via `.gitignore`. Exercise directories live inside the repo as Zephyr applications.
+After `west update`, Zephyr and its modules land as **siblings** of `roz-workshop/` — `roz-ws/zephyr/`, `roz-ws/modules/`, `roz-ws/.west/`, etc. Nothing west-managed lives inside the repo, so the in-repo `.gitignore` does **not** need to list `/zephyr/`, `/modules/`, `/bootloader/`, `/tools/`, or `/.west/`. Exercise directories live inside the repo as Zephyr applications.
 
-This pattern is documented by Zephyr as "application as workspace manifest repository." Use it.
+(Equivalent invocation if you've already `cd`-ed into the repo: `west init -l .` — it still creates `.west/` in the parent.)
 
 ## Prerequisites you can assume
 
 - Zephyr v4.1.0 is released (April 2026) and is the pin target.
-- `github.com/tangybbq/zephyr-lang-rust` exists with a `devel` branch the operator controls.
+- `github.com/zephyrproject-rtos/zephyr-lang-rust` is the upstream Rust language module, and its `devel` branch is what the workshop pins. The only repo on `tangybbq` is `roz-workshop` itself.
 - You're running in a fresh, empty directory that will become the repo root.
 - `west`, `cmake`, a Zephyr SDK, and `rustup` with cross-compilation support are available on your host if you want to verify the build.
 
@@ -43,9 +49,9 @@ Should contain:
 - **Prerequisites:** Zephyr SDK, `west`, Python, `rustup` with the appropriate targets (thumbv7m-none-eabi for Cortex-M3).
 - **Quick start** section:
   ```
+  mkdir roz-ws && cd roz-ws
   git clone https://github.com/tangybbq/roz-workshop.git
-  cd roz-workshop
-  west init -l .
+  west init -l roz-workshop
   west update
   west zephyr-export   # optional; we recommend against for multi-tree users
   # Verify:
@@ -53,11 +59,11 @@ Should contain:
   west build -t run
   ```
   (Note: the upstream recommendation from the workshop notes is to skip `west zephyr-export` — mention it, but flag it as optional.)
-- **Repo layout** — a short tree showing `ex01-explore/` … `ex05-i2c/`, `docs/`, `common/`, `west.yml`, and pointing out that `zephyr/` and `modules/` appear after `west update` and are gitignored.
+- **Repo layout** — a short tree showing `ex01-explore/` … `ex05-i2c/`, `docs/`, `common/`, `west.yml`. Explain that `west update` populates `zephyr/`, `modules/`, `bootloader/`, `tools/`, and `.west/` **alongside** the repo (inside the workspace dir that contains it), not inside the repo itself — so there's nothing west-managed to gitignore at the repo root.
 - **How to run an exercise** — e.g., `west build -b qemu_cortex_m3 ex03-threads && west build -t run`.
 - **Pre-workshop setup:** point at `docs/pre-workshop-setup.md`.
 - **License notice:** Apache-2.0.
-- **Credit:** presented by David Brown (tangybbq) at RustWeek 2026.
+- **Credit:** presented oy David Brown (tangybbq) at RustWeek 2026.
 
 ### 2. `LICENSE` — full Apache-2.0 text
 
@@ -67,7 +73,7 @@ Use the canonical Apache-2.0 text (the full license body, not just the short hea
 
 Goals:
 - Pin Zephyr to tag `v4.1.0`.
-- Point `zephyr-lang-rust` at `github.com/tangybbq/zephyr-lang-rust`, branch `devel`, path `modules/lang/rust`.
+- Override `zephyr-lang-rust` from upstream `zephyrproject-rtos`, branch `devel`, path `modules/lang/rust` (replacing the SHA-pinned entry that ships in Zephyr's `submanifests/optional.yaml`).
 - Keep the rest of Zephyr's module imports intact.
 
 Starting point (adjust for correctness):
@@ -77,22 +83,25 @@ manifest:
   remotes:
     - name: upstream
       url-base: https://github.com/zephyrproject-rtos
-    - name: tangybbq
-      url-base: https://github.com/tangybbq
+
+  defaults:
+    remote: upstream
 
   projects:
     - name: zephyr
-      remote: upstream
       revision: v4.1.0
-      import: true
+      import:
+        name-blocklist:
+          - zephyr-lang-rust
 
     - name: zephyr-lang-rust
-      remote: tangybbq
       revision: devel
       path: modules/lang/rust
 ```
 
-**Verify:** `west manifest --resolve` must parse cleanly. If Zephyr's default manifest imports `zephyr-lang-rust` by default (vs. excluding it via project-filter — the behavior has historically been "disabled by default, enabled via `west config manifest.project-filter +zephyr-lang-rust`"), and your explicit entry above conflicts, use `import.name-blocklist` on the Zephyr project to drop the default entry before re-adding your fork. Confirm behavior by running `west list` after `west update` and making sure the `modules/lang/rust` path points at the `tangybbq` fork on `devel`, not upstream.
+**Why the `name-blocklist`:** Zephyr v4.1.0 declares `zephyr-lang-rust` in `submanifests/optional.yaml` pinned to a SHA, in the `optional` group (filtered out by Zephyr's own `group-filter`). If we just re-declare it at the top level, west sees a name collision. Blocking it from the import lets our entry stand alone — and because our entry has no `groups:`, it's pulled by default, so participants don't have to flip a `project-filter` config.
+
+**Verify:** `west manifest --resolve` must parse cleanly. After `west update`, run `west list` and confirm `modules/lang/rust` points at `zephyrproject-rtos/zephyr-lang-rust` on `devel` (not at the SHA from `submanifests/optional.yaml`).
 
 **Do not pin to a SHA yet.** The operator will bump the `zephyr-lang-rust` revision to a fixed SHA about one week before the workshop (target date 2026-05-18) for day-of reproducibility. Until then, `devel` is intentional.
 
@@ -101,14 +110,6 @@ manifest:
 Exclude, at minimum:
 
 ```
-# Zephyr workspace — pulled down by west update, not checked in
-/.west/
-/zephyr/
-/modules/
-/bootloader/
-/tools/
-/test/
-
 # Build artifacts
 build/
 build-*/
@@ -125,7 +126,7 @@ target/
 .idea/
 ```
 
-Adjust paths once you observe what `west update` actually produces.
+Because the west workspace is the **parent** of this repo (T2 topology), the `.west/`, `zephyr/`, `modules/`, `bootloader/`, `tools/` directories are *siblings* of the repo, not children — so they don't need to be in this `.gitignore`. If the layout ever changes to a workspace-application pattern (repo root = workspace), add them back.
 
 **Decision to flag:** whether to commit `Cargo.lock` files inside exercise directories. Recommendation: **yes**, for reproducibility across participants. Don't ignore them.
 
@@ -175,25 +176,38 @@ This is content worth writing once and referencing everywhere, so participants d
 
 ## Technical constraints
 
-- Apache-2.0 license header on every source file you create in this scaffold pass (there shouldn't be many; maybe none). Header format:
-  ```
-  // Copyright (c) 2026 David Brown
-  // SPDX-License-Identifier: Apache-2.0
-  ```
-- No GitHub Actions in this pass. If you think a CI workflow that builds `hello_world` on push would add value, flag it as a suggestion — don't add it unprompted.
+- Apache-2.0 license header on **every file** you create — source, READMEs, yaml, `.gitignore`, etc. The `LICENSE` file itself is the exception (it is the license body). Use the comment syntax appropriate to the file type:
+  - C / C++ / Rust:
+    ```
+    // Copyright (c) 2026 Linaro, LTD
+    // SPDX-License-Identifier: Apache-2.0
+    ```
+  - YAML / shell / Kconfig / Python / `.gitignore`:
+    ```
+    # Copyright (c) 2026 Linaro, LTD
+    # SPDX-License-Identifier: Apache-2.0
+    ```
+  - Markdown (HTML comment at the very top, before the first heading):
+    ```
+    <!--
+    Copyright (c) 2026 Linaro, LTD
+    SPDX-License-Identifier: Apache-2.0
+    -->
+    ```
+- No GitHub Actions. The operator does not want a CI workflow on this repo.
 - No `Makefile` or `justfile` in this pass unless you're confident it helps. Can be added later.
 
 ## Verification
 
-After scaffolding, confirm:
+After scaffolding, confirm (paths are relative to the workspace dir — the parent of the repo):
 
-1. `west init -l .` runs without error in the repo root.
+1. `west init -l roz-workshop` (or `west init -l .` from inside the repo) runs without error.
 2. `west update` completes and produces:
-   - `zephyr/` at workspace root, pinned to `v4.1.0` (check `git -C zephyr describe`).
-   - `modules/lang/rust/` at the `tangybbq/zephyr-lang-rust` `devel` branch (check `git -C modules/lang/rust remote -v` and `git -C modules/lang/rust log -1`).
-3. `west build -b qemu_cortex_m3 modules/lang/rust/samples/hello_world` succeeds.
+   - `../zephyr/` at workspace root, pinned to `v4.1.0` (check `git -C ../zephyr describe`).
+   - `../modules/lang/rust/` on the upstream `zephyrproject-rtos/zephyr-lang-rust` `devel` branch (check `git -C ../modules/lang/rust remote -v` and `git -C ../modules/lang/rust log -1`).
+3. `west build -b qemu_cortex_m3 ../modules/lang/rust/samples/hello_world` succeeds.
 4. `west build -t run` prints the hello-world output under QEMU.
-5. `git status` is clean (all `west`-produced directories ignored).
+5. `git status` inside the repo is clean (no west-produced directories appear there — they are siblings).
 6. `ls ex0*` shows five exercise directories each with a placeholder `README.md`.
 7. First commit is tidy — one commit for the scaffold is fine.
 
@@ -204,10 +218,8 @@ Report each of these back to the operator in your summary, with pass/fail for ea
 Bubble these up to the operator rather than committing:
 
 1. **Final repo name.** Working default is `roz-workshop`. If the operator prefers something else (e.g., `rustweek-2026-roz`, `rust-on-zephyr-workshop`), rename before first push.
-2. **Exact copyright attribution.** Default above uses "David Brown" — confirm.
-3. **Should `Cargo.lock` files be committed?** Default recommendation: yes. Flag for the operator.
-4. **GitHub Actions CI?** Not in scope for this pass; flag as a suggestion for later if you think it'd add value.
-5. **`west zephyr-export`** — the workshop notes recommend against it for multi-tree users; the quick-start includes it as optional. Confirm the framing is what the operator wants.
+2. **Should `Cargo.lock` files be committed?** Default recommendation: yes. Flag for the operator.
+3. **`west zephyr-export`** — the workshop notes recommend against it for multi-tree users; the quick-start includes it as optional. Confirm the framing is what the operator wants.
 
 ## What you're NOT doing in this pass
 
