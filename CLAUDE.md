@@ -33,7 +33,7 @@ After `west update`, Zephyr and its modules land as **siblings** of `roz-worksho
 
 ## Prerequisites you can assume
 
-- Zephyr v4.1.0 is released (April 2026) and is the pin target.
+- Zephyr v4.4.0 is the latest release as of 2026-04 and is the pin target.
 - `github.com/zephyrproject-rtos/zephyr-lang-rust` is the upstream Rust language module, and its `devel` branch is what the workshop pins. The only repo on `tangybbq` is `roz-workshop` itself.
 - You're running in a fresh, empty directory that will become the repo root.
 - `west`, `cmake`, a Zephyr SDK, and `rustup` with cross-compilation support are available on your host if you want to verify the build.
@@ -72,7 +72,7 @@ Use the canonical Apache-2.0 text (the full license body, not just the short hea
 ### 3. `west.yml` — west manifest
 
 Goals:
-- Pin Zephyr to tag `v4.1.0`.
+- Pin Zephyr to tag `v4.4.0`.
 - Override `zephyr-lang-rust` from upstream `zephyrproject-rtos`, branch `devel`, path `modules/lang/rust` (replacing the SHA-pinned entry that ships in Zephyr's `submanifests/optional.yaml`).
 - Keep the rest of Zephyr's module imports intact.
 
@@ -89,7 +89,7 @@ manifest:
 
   projects:
     - name: zephyr
-      revision: v4.1.0
+      revision: v4.4.0
       import:
         name-blocklist:
           - zephyr-lang-rust
@@ -99,7 +99,7 @@ manifest:
       path: modules/lang/rust
 ```
 
-**Why the `name-blocklist`:** Zephyr v4.1.0 declares `zephyr-lang-rust` in `submanifests/optional.yaml` pinned to a SHA, in the `optional` group (filtered out by Zephyr's own `group-filter`). If we just re-declare it at the top level, west sees a name collision. Blocking it from the import lets our entry stand alone — and because our entry has no `groups:`, it's pulled by default, so participants don't have to flip a `project-filter` config.
+**Why the `name-blocklist`:** Zephyr v4.4.0 declares `zephyr-lang-rust` in `submanifests/optional.yaml` pinned to a SHA, in the `optional` group (filtered out by Zephyr's own `group-filter`). If we just re-declare it at the top level, west sees a name collision. Blocking it from the import lets our entry stand alone — and because our entry has no `groups:`, it's pulled by default, so participants don't have to flip a `project-filter` config.
 
 **Verify:** `west manifest --resolve` must parse cleanly. After `west update`, run `west list` and confirm `modules/lang/rust` points at `zephyrproject-rtos/zephyr-lang-rust` on `devel` (not at the SHA from `submanifests/optional.yaml`).
 
@@ -203,7 +203,7 @@ After scaffolding, confirm (paths are relative to the workspace dir — the pare
 
 1. `west init -l roz-workshop` (or `west init -l .` from inside the repo) runs without error.
 2. `west update` completes and produces:
-   - `../zephyr/` at workspace root, pinned to `v4.1.0` (check `git -C ../zephyr describe`).
+   - `../zephyr/` at workspace root, pinned to `v4.4.0` (check `git -C ../zephyr describe`).
    - `../modules/lang/rust/` on the upstream `zephyrproject-rtos/zephyr-lang-rust` `devel` branch (check `git -C ../modules/lang/rust remote -v` and `git -C ../modules/lang/rust log -1`).
 3. `west build -b qemu_cortex_m3 ../modules/lang/rust/samples/hello_world` succeeds.
 4. `west build -t run` prints the hello-world output under QEMU.

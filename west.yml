@@ -10,13 +10,13 @@
 # siblings of the exercise directories and ignored by git.
 #
 # Pinning policy:
-#   - Zephyr is pinned to the v4.1.0 release tag.
+#   - Zephyr is pinned to the v4.4.0 release tag.
 #   - zephyr-lang-rust tracks upstream `devel` for now. About one week
 #     before the workshop (target 2026-05-18) this revision will be
 #     replaced with a fixed SHA for day-of reproducibility.
 #
 # Why the import name-blocklist:
-#   Zephyr v4.1.0 declares zephyr-lang-rust in submanifests/optional.yaml
+#   Zephyr v4.4.0 declares zephyr-lang-rust in submanifests/optional.yaml
 #   pinned to a specific SHA, in the `optional` group (which Zephyr's own
 #   group-filter excludes). We block that entry from the import so our
 #   top-level entry — which has no group and so is pulled by default —
@@ -32,7 +32,7 @@ manifest:
 
   projects:
     - name: zephyr
-      revision: v4.1.0
+      revision: v4.4.0
       import:
         name-blocklist:
           - zephyr-lang-rust
