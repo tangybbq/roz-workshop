@@ -47,7 +47,7 @@ You should see the hello-world output under QEMU. Press `Ctrl-a x` to exit QEMU.
 ```
 roz-ws/                        ← your workspace directory
 ├── .west/                     ← created by `west init` (ignored by roz-workshop)
-├── zephyr/                    ← pulled by `west update`, pinned to v4.1.0
+├── zephyr/                    ← pulled by `west update`, pinned to v4.4.0
 ├── modules/                   ← Zephyr modules, including lang/rust on upstream `devel`
 ├── bootloader/
 ├── tools/
@@ -65,12 +65,15 @@ roz-ws/                        ← your workspace directory
 
 ## Running an exercise
 
-From the workspace dir (the parent of `roz-workshop/`):
+`cd` into the exercise directory and build it as its own Zephyr app:
 
 ```sh
-west build -b qemu_cortex_m3 roz-workshop/ex03-threads
+cd roz-workshop/ex01-explore
+west build -b qemu_cortex_m3 .
 west build -t run
 ```
+
+Each exercise keeps its own `build/` directory, so you can move between exercises without pristine rebuilds. Press `Ctrl-a x` to exit QEMU.
 
 Each exercise's `README.md` notes any deviations (different board, extra Kconfig, etc.). For rust-analyzer and `cargo check` support inside an exercise directory, see [`common/README.md`](common/README.md).
 
