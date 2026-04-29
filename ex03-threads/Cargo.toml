@@ -1,0 +1,17 @@
+# Copyright (c) 2026 Linaro, LTD
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+# This must be rustapp for now.
+name = "rustapp"
+version = "0.1.0"
+edition = "2021"
+description = "Threads + channel ticker for the Rust on Zephyr workshop"
+license = "Apache-2.0 OR MIT"
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+zephyr = "0.1.0"
+log = "0.4.22"
