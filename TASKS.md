@@ -43,6 +43,12 @@ Apply to every exercise unless overridden:
   symlink generated per build.
 - **Reference `common/README.md`** for the symlink trick; don't duplicate
   those instructions into per-exercise READMEs.
+- **Do NOT run `west build -t run` or `west build -t qemu` during a code
+  pass.** QEMU runs interactively and has no reliable exit path from a
+  non-interactive shell. Verify that the application *builds* cleanly
+  (`west build -b qemu_cortex_m3 .`), but do not launch it. If you need
+  to confirm runtime output, flag it in the commit message and ask David
+  to run it manually.
 
 ## Cross-cutting content
 
@@ -64,7 +70,7 @@ repeating.
 |----|--------------------|--------------------------------|--------------------|-------|---------------------|
 | 01 | ex01-explore       | Tour the Zephyr tree           | Module 1a (What is Zephyr)   | 20m   | READY FOR CODE PASS |
 | 02 | ex02-rust-analyzer | rust-analyzer + Cargo edit     | Module 2a (Build pipeline)   | 15m   | READY FOR CODE PASS |
-| 03 | ex03-threads       | Threads + channel ticker       | Module 3a (Threads + sync)   | 25m   | DRAFT UNSPEC        |
+| 03 | ex03-threads       | Threads + channel ticker       | Module 3a (Threads + sync)   | 25m   | READY FOR CODE PASS |
 | 04 | ex04-async         | Embassy async rewrite of ex03  | Module 4a (Async)            | 25m   | DRAFT UNSPEC        |
 | 05 | ex05-i2c           | Safe bindings vs raw sys       | Module 5a (Devices)          | 25m   | DRAFT UNSPEC        |
 
@@ -256,25 +262,212 @@ rust-analyzer-visible error before they run `cargo check`. Sharper
 pedagogy ("rust-analyzer caught it before the compiler"), but the
 positive-feedback heapless beat is the primary version.
 
-## ex03-threads — DRAFT UNSPEC
+## ex03-threads — READY FOR CODE PASS
 
-Direction, not spec:
+**Placement:** Module 3b in `workshop-outline.md`, immediately after
+the "Threads and synchronization" lecture (Module 3a). 25 min budget.
 
-- Start with the **single-threaded uptime ticker**: one `rust_main()`
-  that uses `zephyr::timers::Timer` on a 1s period, `zephyr::time::Instant`
-  for elapsed, and `log::info!` for output (with logging init per the
-  hello_world pattern). Runs for N iterations then returns.
-- **Then extend it** to a two-thread structure: a producer thread ticks
-  and sends uptime samples through a bounded `zephyr::sync::channel`; a
-  consumer thread receives and logs. Threads are declared via
-  `#[zephyr::thread]`.
-- This is the first exercise where the QEMU virtual-time caveat bites.
-  Include the aside.
+**What attendees have at this point:**
+- ex01 and ex02 done. Working rust-analyzer, successful builds, no_std
+  crate experience.
+- Module 3a heard: static allocation, `#[zephyr::thread]` proc macro,
+  `ReadyThread` → `.start()` → `RunningThread` lifecycle, thread pools,
+  `join`/`join_timeout`. Sync primitives covered: atomics, SpinMutex,
+  Mutex, condvar, channels. The static/Pin problem explained.
+- *Not yet:* async (Module 4a/4b), devices (Module 5).
 
-Not yet specified: exact API choices (SpinMutex vs Mutex vs channel
-only; whether to use the ReadyThread `start()` dance or just drop-and-go;
-pool vs singleton threads). Come back after ex01/ex02 land and we've
-seen what the notes actually say about ex03.
+**Application structure:** a standalone Zephyr application — the usual
+`CMakeLists.txt`, `prj.conf`, `Cargo.toml`, `Cargo.lock`, and
+`src/lib.rs`. Use `modules/lang/rust/samples/hello_world` as the shape
+template.
+
+**prj.conf:**
+```
+CONFIG_RUST=y
+CONFIG_RUST_ALLOC=y
+CONFIG_MAIN_STACK_SIZE=4096
+CONFIG_LOG=y
+CONFIG_LOG_BACKEND_RTT=n
+```
+`CONFIG_RUST_ALLOC=y` is required: `zephyr::sync::channel::bounded`
+allocates its message pool once via `Box` at channel-creation time
+(not per message). This is the right embedded choice — allocate up
+front, not in the hot path — but it does need the heap.
+
+**Design decisions (all settled):**
+
+- **Go straight to two threads.** No single-threaded warm-up phase.
+  The interesting part of this exercise is the channel and the thread
+  lifecycle, not a simple sleep loop.
+- **`#[zephyr::thread(stack_size = 2048)]` with no `pool_size`.**
+  `pool_size` defaults to 1, making each declaration a singleton. One
+  declaration for the producer, one for the consumer.
+- **`.start()` dance is required.** The current API creates threads in
+  a non-running state (`K_FOREVER` delay); `.start()` is what wakes them.
+  `producer(sender).start()` returns a `RunningThread`. The README
+  should make the two-step visible — it mirrors what the lecture said.
+- **Bounded channel of depth 4.** `zephyr::sync::channel::bounded(4)`
+  returns `(Sender<u32>, Receiver<u32>)`. The `Sender` and `Receiver`
+  are `Send`, so they can be passed directly as thread arguments.
+- **Channel-only synchronization.** No Mutex needed — the channel is the
+  coordination point. SpinMutex/Mutex are lecture content, not exercise
+  content here.
+- **`zephyr::time::sleep(Duration)` for the 1 Hz tick.** Timer callbacks
+  are the wrong API; `sleep` in a loop is idiomatic and matches the
+  philosophers sample.
+- **Runs forever; exit with `Ctrl-a x`.** Zephyr on `qemu_cortex_m3`
+  has no programmatic QEMU exit mechanism. Both threads loop forever.
+  `rust_main` starts both and then joins the producer (which also blocks
+  forever). `Ctrl-a x` is how you exit QEMU from the exercise.
+- **Stack size 2048 for thread stacks.** Should be adequate for a simple
+  ticker with `log::info!`. Note in the README: stack overflow detection
+  is unreliable on this target — if things crash mysteriously, suspect
+  the stack. The `CONFIG_MAIN_STACK_SIZE=4096` in prj.conf covers
+  `rust_main` itself.
+
+**Starter source:** new application, not copied from hello_world. Write
+`src/lib.rs` from scratch using hello_world's logger-init pattern, but
+with the two-thread producer/consumer structure below. The file must
+have the Apache-2.0 header.
+
+**`src/lib.rs` structure (canonical shape for the code pass):**
+
+```rust
+// Copyright (c) 2026 Linaro, LTD
+// SPDX-License-Identifier: Apache-2.0
+
+#![no_std]
+#![allow(unexpected_cfgs)]
+
+use zephyr::sync::channel::{self, Sender, Receiver};
+use zephyr::time::{sleep, Duration};
+use log::info;
+
+#[zephyr::thread(stack_size = 2048)]
+fn producer(sender: Sender<u32>) {
+    let mut count: u32 = 0;
+    loop {
+        sleep(Duration::secs_at_least(1));
+        sender.send(count).unwrap();
+        count += 1;
+    }
+}
+
+#[zephyr::thread(stack_size = 2048)]
+fn consumer(receiver: Receiver<u32>) {
+    loop {
+        let tick = receiver.recv().unwrap();
+        info!("tick: {}", tick);
+    }
+}
+
+#[no_mangle]
+extern "C" fn rust_main() {
+    unsafe { zephyr::set_logger().unwrap(); }
+
+    let (sender, receiver) = channel::bounded(4);
+
+    let producer_thread = producer(sender).start();
+    let _consumer_thread = consumer(receiver).start();
+
+    // Both threads loop forever; join the producer so rust_main
+    // doesn't return (which would idle Zephyr, not exit QEMU).
+    producer_thread.join().unwrap();
+}
+```
+
+**Verify before committing:** the above is the intended shape — confirm
+it compiles and produces output under `west build -t run` before writing
+the README.
+
+**QEMU virtual time — include this callout in the README:**
+
+> **Note on QEMU timing:** When every thread is blocked waiting on a
+> sleep or channel receive, QEMU advances its virtual clock to the next
+> scheduled event instead of wall-sleeping. Printed tick counts are
+> truthful — Zephyr sees the correct elapsed ticks — but the terminal
+> output may arrive in a burst rather than one line per wall-second.
+> On a real board, output paces naturally.
+
+**Stack overflow note (include in the README as a callout):**
+
+> **If the exercise crashes unexpectedly:** stack overflow detection is
+> unreliable on `qemu_cortex_m3` — the guard pages don't always fire
+> before a crash. 2048 bytes is enough for this exercise, but if you
+> extend it heavily (e.g., with format strings or large local variables),
+> raise `stack_size` before debugging further.
+
+**README.md structure (what Claude Code should write):**
+
+The README should walk participants through at roughly the following
+pace:
+
+1. **Orientation** (1 min read) — what they're building: a producer
+   thread that counts at 1 Hz and sends over a channel; a consumer
+   that receives and logs. Point forward to ex04: this same structure
+   gets rewritten as Embassy tasks.
+
+2. **Build and run the starter** — the repo ships the complete starter
+   for this exercise. Build it, run it under QEMU, observe the output.
+   Include the QEMU virtual-time callout here.
+
+3. **Read the thread declarations** — have participants look at the
+   `#[zephyr::thread(stack_size = 2048)]` annotations on `producer`
+   and `consumer`. What does the proc macro do? (Answer: declares
+   static stack and thread data, wraps the function so calling it
+   returns a `ReadyThread`.) Refer back to Module 3a's static-allocation
+   discussion.
+
+4. **Trace the lifecycle in `rust_main`** — `channel::bounded(4)`,
+   `producer(sender).start()`, `consumer(receiver).start()`,
+   `producer_thread.join()`. Have them identify: what type does
+   `producer(sender)` return? What does `.start()` do? Why does the
+   channel need depth at all — what happens if the producer is faster
+   than the consumer?
+
+5. **Modify it** — change the tick interval to 500 ms, or change the
+   logged format to include the Zephyr uptime (`zephyr::time::now()`
+   can give an `Instant`; its `.ticks()` value is printable). Rebuild
+   and confirm. This is a short modification, not a full rewrite — the
+   point is to touch the code, not invent a new exercise.
+
+6. **Stretch: mixed-message stream** — change the channel type to a
+   `Message` enum:
+   ```rust
+   enum Message {
+       Tick(u32),
+       Stop,
+   }
+   ```
+   Add a third thread that sleeps for 10 seconds then sends `Message::Stop`.
+   Have the consumer `match` on the received value and break out of its
+   loop on `Stop`. `rust_main` joins the consumer instead of the producer.
+   Exit should be clean (consumer logs "stopping" and returns; QEMU may
+   or may not exit depending on Zephyr's idle behavior — that's fine).
+
+**Success criteria:** participants have seen a working two-thread
+producer/consumer, traced the `ReadyThread → .start() → RunningThread`
+lifecycle in real code, and made at least one modification that required
+a rebuild. They leave with a mental model of how channels replace shared
+state and why bounded depth matters.
+
+**What this exercise is NOT:** it is not asking participants to design
+the threading structure from scratch. The starter ships working code.
+The cognitive work is reading, tracing, and modifying — not blank-page
+coding. This prepares them for ex04, where they do the rewrite.
+
+**Open decisions / code-pass verifications:**
+- Confirm that `Duration::secs_at_least` is the right constructor (check
+  fugit API in the version the devel branch is on). The philosophers
+  sample uses `Duration::secs_at_least` and `Duration::millis_at_least`.
+- Confirm `channel::bounded` import path is `zephyr::sync::channel::bounded`
+  against the current devel tree.
+- Confirm `zephyr::set_logger()` is the right logger init call (matches
+  hello_world pattern).
+- Confirm the `#[zephyr::thread]` macro attribute name against devel —
+  it has been `#[zephyr::thread]` in the codebase but verify.
+- Run under QEMU and confirm output actually appears (virtual-time burst
+  is fine; silence is not).
 
 ## ex04-async — DRAFT UNSPEC
 
@@ -283,10 +476,18 @@ single executor, same behavior. Headline: fewer static allocations, no
 stacks, `select!` composability. Fits the "tell the journey" async
 narrative in the notes.
 
-Blocked-on-decision: whether attendees write the executor boilerplate
-by hand (`StaticCell<Executor>`, spawn pattern from the notes) or
-whether we ship a prepared `main.rs` with the boilerplate in place and
-they just add tasks.
+**Settled decision:** ship a prepared `src/lib.rs` starter with the
+`StaticCell<Executor>` boilerplate in place. Participants focus on
+converting the thread functions to `#[embassy_executor::task]` async
+fns and adding the `select!` branch — not on learning the Embassy
+executor wiring under time pressure. The executor setup pattern is
+shown in the lecture (Module 4a) and in the starter; the exercise is
+about writing async tasks, not about configuring the executor.
+
+Still to specify: exact starter shape, `select!` branch target (idle
+timeout vs. a stop signal), and whether the channel is kept from ex03
+or replaced with Embassy channels. Come back once ex03 is built and
+we can see what the transition naturally looks like.
 
 ## ex05-i2c — DRAFT UNSPEC
 
