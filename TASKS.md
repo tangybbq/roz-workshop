@@ -71,7 +71,7 @@ repeating.
 | 01 | ex01-explore       | Tour the Zephyr tree           | Module 1a (What is Zephyr)   | 20m   | READY FOR CODE PASS |
 | 02 | ex02-rust-analyzer | rust-analyzer + Cargo edit     | Module 2a (Build pipeline)   | 15m   | READY FOR CODE PASS |
 | 03 | ex03-threads       | Threads + channel ticker       | Module 3a (Threads + sync)   | 25m   | READY FOR CODE PASS |
-| 04 | ex04-async         | Embassy async rewrite of ex03  | Module 4a (Async)            | 25m   | DRAFT UNSPEC        |
+| 04 | ex04-async         | Embassy async rewrite of ex03  | Module 4a (Async)            | 25m   | READY FOR CODE PASS |
 | 05 | ex05-i2c           | Safe bindings vs raw sys       | Module 5a (Devices)          | 25m   | DRAFT UNSPEC        |
 
 Times are targets against a ~55/45 lecture/hands-on pacing over 5 hours;
@@ -456,6 +456,23 @@ the threading structure from scratch. The starter ships working code.
 The cognitive work is reading, tracing, and modifying — not blank-page
 coding. This prepares them for ex04, where they do the rewrite.
 
+**Solution directory:** create `ex03-threads/solution/` containing the
+stretch goal implementation — the three-thread variant using a `Message`
+enum. The solution is a complete, buildable Zephyr application (its own
+`CMakeLists.txt`, `prj.conf`, `Cargo.toml`, `Cargo.lock`, `src/lib.rs`)
+with the channel type changed to `bounded::<Message>(4)` where:
+```rust
+enum Message {
+    Tick(u32),
+    Stop,
+}
+```
+The third thread sleeps 10 seconds then sends `Message::Stop`. The
+consumer `match`es on the value and `break`s cleanly on `Stop`, logs
+"stopping", and returns. `rust_main` joins the consumer thread (not the
+producer) so it exits when the consumer does. This is self-contained
+enough that participants can read and run it without the base ex03.
+
 **Open decisions / code-pass verifications:**
 - Confirm that `Duration::secs_at_least` is the right constructor (check
   fugit API in the version the devel branch is on). The philosophers
@@ -469,25 +486,209 @@ coding. This prepares them for ex04, where they do the rewrite.
 - Run under QEMU and confirm output actually appears (virtual-time burst
   is fine; silence is not).
 
-## ex04-async — DRAFT UNSPEC
+## ex04-async — READY FOR CODE PASS
 
-Direction: rewrite ex03's two-thread design as two Embassy tasks on a
-single executor, same behavior. Headline: fewer static allocations, no
-stacks, `select!` composability. Fits the "tell the journey" async
-narrative in the notes.
+**Placement:** Module 4b in `workshop-outline.md`, immediately after
+the "Async on Zephyr" lecture (Module 4a). 25 min budget.
 
-**Settled decision:** ship a prepared `src/lib.rs` starter with the
-`StaticCell<Executor>` boilerplate in place. Participants focus on
-converting the thread functions to `#[embassy_executor::task]` async
-fns and adding the `select!` branch — not on learning the Embassy
-executor wiring under time pressure. The executor setup pattern is
-shown in the lecture (Module 4a) and in the starter; the exercise is
-about writing async tasks, not about configuring the executor.
+**What attendees have at this point:**
+- ex01–ex03 done. A working producer/consumer in ex03 that they built
+  and modified. They know the `#[zephyr::thread]` + channel pattern.
+- Module 4a heard: async refresher, why async on an RTOS, the work-queue
+  executor journey, Embassy executor on a Zephyr thread, `StaticCell`
+  pattern, `select!` / `join!` composability, limitations, vision.
+- *Not yet:* devices (Module 5).
 
-Still to specify: exact starter shape, `select!` branch target (idle
-timeout vs. a stop signal), and whether the channel is kept from ex03
-or replaced with Embassy channels. Come back once ex03 is built and
-we can see what the transition naturally looks like.
+**The exercise in one sentence:** convert ex03's two `#[zephyr::thread]`
+functions into two `#[embassy_executor::task]` async functions, keeping
+identical observable behavior, then add a `select!` idle-timeout branch
+to the consumer that the thread version fundamentally cannot express.
+
+**Application structure:** standalone Zephyr application — same shape as
+ex03. `CMakeLists.txt`, `prj.conf`, `Cargo.toml`, `Cargo.lock`,
+`src/lib.rs`. Start from the ex03 shape as a reference but write the
+files fresh; do not copy ex03 verbatim.
+
+**prj.conf:**
+```
+CONFIG_RUST=y
+CONFIG_RUST_ALLOC=y
+CONFIG_MAIN_STACK_SIZE=4096
+CONFIG_LOG=y
+CONFIG_LOG_BACKEND_RTT=n
+CONFIG_POLL=y
+```
+`CONFIG_POLL=y` is required by the Embassy executor on Zephyr.
+
+**Cargo.toml:**
+```toml
+[dependencies]
+zephyr = { version = "0.1.0", features = ["time-driver", "executor-zephyr"] }
+log = "0.4.22"
+static_cell = "2.1"
+embassy-executor = { version = "0.7.0", features = ["log", "task-arena-size-2048"] }
+embassy-sync = "0.6.2"
+embassy-time = "0.4.0"
+embassy-futures = "0.1.1"
+```
+
+`time-driver` and `executor-zephyr` on the `zephyr` crate wire the
+Embassy time driver and executor backend into Zephyr's kernel.
+`task-arena-size-2048` sets the Embassy task memory pool. If the arena
+is too small the executor panics at spawn time — easy to diagnose and
+fix by increasing the number. 2048 is sufficient for two simple tasks.
+`embassy-time` is left without a `tick-hz-*` feature; the default 1 MHz
+assumption involves a runtime conversion but this is irrelevant on QEMU.
+
+**Design decisions (all settled):**
+
+- **Channel: `embassy_sync::channel::Channel`, not `zephyr::sync::channel::bounded`.**
+  The Zephyr bounded channel's `.recv()` blocks the OS thread, which
+  would freeze the entire executor. `embassy_sync::channel::Channel`
+  is truly async — `.receive().await` suspends only the task. It is also
+  declared as a `static` constant with no alloc:
+  ```rust
+  static CHANNEL: Channel<CriticalSectionRawMutex, u32, 4> = Channel::new();
+  ```
+  This distinction is worth one sentence in the README — it is the
+  concrete form of the "async composability" argument from the lecture.
+
+- **Timer: `embassy_time::Timer::after(Duration::from_secs(1)).await`.**
+  Replaces `zephyr::time::sleep(...)`. Note that `embassy_time::Duration`
+  and `zephyr::time::Duration` are different types; imports must be
+  explicit to avoid ambiguity.
+
+- **Executor: `zephyr::embassy::Executor` on the main thread.**
+  `executor.run()` never returns, so `rust_main` never returns either.
+  No `join` needed.
+
+- **`select!` branch: 3-second idle timeout in the consumer.**
+  Uses `embassy_futures::select::{select, Either}`. Under normal
+  operation (producer at 1 Hz, timeout at 3 s) the `Either::Second`
+  branch never fires — but participants can verify it by temporarily
+  bumping the producer sleep to 5 seconds.
+
+- **Starter ships with boilerplate in place; participants write task bodies.**
+  The executor setup, static declarations, and empty task stubs with
+  `// TODO` comments are provided. Participants fill in the task bodies
+  and add the `select!` branch. That is the right scope for 25 minutes.
+
+- **Solution directory at `ex04-async/solution/`.**
+  Complete working implementation for participants who get stuck.
+  See also `ex03-threads/solution/` for the ex03 stretch goal
+  (the `Message` enum / three-thread variant) — create that too as
+  part of this code pass.
+
+**`src/lib.rs` starter shape (what Claude Code should write and ship):**
+
+```rust
+// Copyright (c) 2026 Linaro, LTD
+// SPDX-License-Identifier: Apache-2.0
+
+#![no_std]
+#![allow(unexpected_cfgs)]
+
+use embassy_futures::select::{select, Either};
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
+use embassy_time::{Duration, Timer};
+use log::info;
+use static_cell::StaticCell;
+use zephyr::embassy::Executor;
+
+static EXECUTOR: StaticCell<Executor> = StaticCell::new();
+static CHANNEL: Channel<CriticalSectionRawMutex, u32, 4> = Channel::new();
+
+#[no_mangle]
+extern "C" fn rust_main() {
+    unsafe { zephyr::set_logger().unwrap(); }
+    let executor = EXECUTOR.init(Executor::new());
+    executor.run(|spawner| {
+        spawner.spawn(producer()).unwrap();
+        spawner.spawn(consumer()).unwrap();
+    });
+}
+
+#[embassy_executor::task]
+async fn producer() {
+    // TODO: Loop forever, sending an incrementing u32 counter into CHANNEL
+    // every 1 second using Timer::after(...).await.
+    // Hint: CHANNEL.send(value).await
+}
+
+#[embassy_executor::task]
+async fn consumer() {
+    // TODO: Loop forever, waiting on CHANNEL.receive() OR a 3-second idle
+    // timeout using select(...).await. Log which branch fired and what value
+    // was received (if any).
+    // Hint: match select(CHANNEL.receive(), Timer::after(...)).await { ... }
+}
+```
+
+**Verify before committing:** confirm the starter builds cleanly
+(`west build -b qemu_cortex_m3 .`) with the empty task bodies. The
+solution in `ex04-async/solution/` must also build cleanly.
+
+**README.md structure:**
+
+1. **Orientation** (1 min read) — what they're doing: same producer/
+   consumer as ex03, different mechanism. Two tasks on one thread instead
+   of two threads. Point to the `solution/` directory for when they get
+   stuck.
+
+2. **Run the starter** — build and run. The tasks are stubs so nothing
+   happens (or it panics if the stubs don't compile — confirm during
+   the code pass which behavior the empty bodies produce and note it).
+
+3. **Write the producer** (5–8 min) — fill in the `producer()` body.
+   Call out: `Timer::after` returns a `Future`; `.await` is what
+   actually suspends the task. Compare to ex03's `sleep()` which
+   blocked the thread. Rebuild and confirm ticks appear.
+
+4. **Write the consumer — first version** (5 min) — simple
+   `CHANNEL.receive().await` loop with `info!`. Rebuild, confirm output
+   matches ex03 behavior. Note that both tasks are running on the same
+   thread — no OS thread switch happens between a send and its receive.
+
+5. **Add the `select!` branch** (5–8 min) — the payoff. Replace the
+   simple receive with the `select(CHANNEL.receive(), Timer::after(...))`.
+   Rebuild. Then deliberately break it: bump the producer sleep to
+   `Duration::from_secs(5)` and observe the idle branch firing. Restore.
+
+6. **Compare to ex03** (2 min, discussion prompt) — how many static
+   allocations did ex03 need vs. ex04? (ex03: two thread stacks at 2048
+   each + two `ThreadData` structs + the channel's `Box`ed pool; ex04:
+   one `StaticCell<Executor>` + the task arena at 2048 + the static
+   `Channel`.) Which is more? Does it matter? When would you prefer
+   threads?
+
+7. **Stretch: two executors at different priorities** — declare a second
+   Zephyr thread via `kobj_define!` + `StaticThread`, run a second
+   `StaticCell<Executor>` on it at a lower priority, spawn the consumer
+   there. Observe that the producer (high priority) can preempt the
+   consumer between sends. This is the multi-executor priority story
+   from Module 4a. This is a genuine stretch — it involves
+   `kobj_define!` which hasn't been introduced yet, so provide a hint
+   pointing at `modules/lang/rust/samples/embassy/src/lib.rs` for the
+   pattern.
+
+**Success criteria:** participants have a working async producer/consumer
+with a `select!` idle-timeout branch, have observed the 3-second timeout
+fire by slowing the producer, and can articulate the difference between
+`select!` on Embassy futures vs. `k_poll` on Zephyr kernel objects.
+
+**Open decisions / code-pass verifications:**
+- Confirm `CONFIG_POLL=y` is required in prj.conf (check against the
+  async-philosophers sample — it has this).
+- Confirm `zephyr::embassy::Executor` is the correct import path on the
+  current devel tree.
+- Confirm `embassy_futures::select::{select, Either}` is the right API
+  (not a `select!` macro) — the async-philosophers sample uses the
+  function form, not a macro.
+- Confirm the empty `async fn` stubs in the starter either compile
+  cleanly or produce a clear error; note the outcome in a code comment
+  so the README guidance is accurate.
+- The arena-size analysis script (David has it) can be used to verify
+  2048 is sufficient if there is any doubt.
 
 ## ex05-i2c — DRAFT UNSPEC
 
