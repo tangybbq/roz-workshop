@@ -138,6 +138,14 @@ When the consumer returns, Zephyr keeps running its idle thread —
 QEMU may not exit on its own, and that's fine. The point is that
 *your* threads have shut down deterministically.
 
+> **Heads up — bounded channel handles can't be dropped.** Zephyr's
+> kernel may still hold pointers into the channel's storage (e.g., a
+> thread parked inside `k_msgq`), so reclaiming the storage would be
+> unsound — and the crate panics on the last `Drop` of either side
+> rather than do so. In a normal exit path you have to leak the handle
+> with `core::mem::forget(...)` before the thread returns. See
+> [`solution/src/lib.rs`](solution/src/lib.rs) for the full pattern.
+
 ## If the exercise crashes unexpectedly
 
 Stack overflow detection is unreliable on `qemu_cortex_m3` — the

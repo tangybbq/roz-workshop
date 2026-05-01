@@ -1,0 +1,17 @@
+# Copyright (c) 2026 Linaro, LTD
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+# This must be rustapp for now.
+name = "rustapp"
+version = "0.1.0"
+edition = "2021"
+description = "Stretch-goal solution for ex03 — three threads with a Message enum"
+license = "Apache-2.0 OR MIT"
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+zephyr = "0.1.0"
+log = "0.4.22"
