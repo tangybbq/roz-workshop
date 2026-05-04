@@ -1,0 +1,19 @@
+/*
+ * Copyright (c) 2026 Linaro, LTD
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Wire the `i2c-bus` alias to i2c0 on the nRF52840 DK.  i2c0 is already
+ * pinned and statused-okay in the upstream board DTS as `arduino_i2c`,
+ * so all we need is the alias the typed Rust binding looks up.
+ *
+ * The exercise treats this as a build target only — no SHT45 lives on
+ * the bus.  The application still compiles and the typed
+ * `zephyr::device::i2c::I2c` bindings still resolve through
+ * `zephyr::devicetree::aliases::i2c_bus::get_instance()`.
+ */
+
+/ {
+	aliases {
+		i2c-bus = &i2c0;
+	};
+};
