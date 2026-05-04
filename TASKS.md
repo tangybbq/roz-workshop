@@ -72,7 +72,7 @@ repeating.
 | 02 | ex02-rust-analyzer | rust-analyzer + Cargo edit     | Module 2a (Build pipeline)   | 15m   | READY FOR CODE PASS |
 | 03 | ex03-threads       | Threads + channel ticker       | Module 3a (Threads + sync)   | 25m   | READY FOR CODE PASS |
 | 04 | ex04-async         | Embassy async rewrite of ex03  | Module 4a (Async)            | 25m   | READY FOR CODE PASS |
-| 05 | ex05-i2c           | Safe bindings vs raw sys       | Module 5a (Devices)          | 25m   | DRAFT UNSPEC        |
+| 05 | ex05-i2c           | Safe bindings vs raw sys       | Module 5a (Devices)          | 25m   | READY FOR CODE PASS |
 
 Times are targets against a ~55/45 lecture/hands-on pacing over 5 hours;
 confirm once slide timings are firmer.
@@ -690,17 +690,343 @@ fire by slowing the producer, and can articulate the difference between
 - The arena-size analysis script (David has it) can be used to verify
   2048 is sufficient if there is any doubt.
 
-## ex05-i2c — DRAFT UNSPEC
+## ex05-i2c — READY FOR CODE PASS
 
-Direction: two side-by-side samples — "hard way" using raw `zephyr-sys`
-with a subtle memory-safety bug to spot, and "safe way" using the
-typed I²C bindings. Compile-and-review, not run-on-hardware (no I²C
-device on `qemu_cortex_m3`).
+**Placement:** Module 5b in `workshop-outline.md`, immediately after
+the "Devices: hard way vs better way" lecture (Module 5a). 25 min budget.
 
-Blocked on: I²C safe bindings landing fully in `devel` and the hard-way
-example having concrete bindings to call. Per memory as of 2026-04-15,
-lightweight bindings are merged; async bindings are more complex and
-not needed for this exercise. Revisit closer to the workshop.
+**What attendees have at this point:**
+- ex01–ex04 done. Full thread + async experience.
+- Module 5a heard: Zephyr C device model (`void *` vtable), the hard-way
+  (raw `zephyr-sys`), its problems (type confusion, buffer lifetime,
+  unchecked address, no thread-safety, C glue), the devicetree bridge
+  (`build_dts()` → `zephyr::devicetree`), the better-way (typed safe
+  bindings), the economic argument.
+- *Not yet:* Module 6 (contributing).
+
+**The exercise in one sentence:** read two implementations of the same
+I²C read — one raw and unsafe, one using the typed bindings — find the
+seeded memory-safety bug in the raw version, then articulate what the
+type system is doing in the safe version.
+
+**This is a reading exercise, not a coding exercise.** The starter ships
+two complete source files. There is no blank page. The cognitive work is
+analysis: finding a subtle bug and explaining type-system invariants.
+
+---
+
+### Board and build target
+
+**Primary board: `myra_sip_baseboard`.**
+
+`qemu_cortex_m3` has no I²C hardware; the better-way code uses
+`zephyr::devicetree::aliases::i2c_bus::get_instance()` which requires a
+board with an `i2c-bus` DTS alias. `myra_sip_baseboard` is the right
+choice: Cortex-M4F (`RUST_SUPPORTED=y` via `CPU_CORTEX_M`), I²C
+enabled, and its Renode platform file already has
+`sht4x: I2C.SHT45 @ i2c1 0x44` wired up — enabling the optional stretch.
+
+Build command for this exercise:
+```
+cd roz-workshop/ex05-i2c
+west build -b myra_sip_baseboard .
+```
+
+**Reading tasks stand alone even without a successful build.** Most
+participants won't have encountered `myra_sip_baseboard` before. That's
+fine — the point is not the board, it's the contrast between the two
+files. If the build fails for any reason, the reading tasks still work.
+The README should say this explicitly.
+
+**Board overlay** (`boards/myra_sip_baseboard.overlay`):
+```dts
+/ {
+    aliases {
+        i2c-bus = &i2c1;
+    };
+};
+```
+This wires the `i2c_bus` alias to the I²C controller that has the SHT45
+on it in the Renode platform description.
+
+**prj.conf:**
+```
+CONFIG_RUST=y
+CONFIG_RUST_ALLOC=y
+CONFIG_MAIN_STACK_SIZE=4096
+CONFIG_I2C=y
+CONFIG_LOG=y
+CONFIG_LOG_BACKEND_RTT=n
+```
+
+**Cargo.toml:** standard — just `zephyr = "0.1.0"` and `log = "0.4.22"`.
+No extra crates needed.
+
+---
+
+### The scenario
+
+Both files interact with an SHT45 temperature/humidity sensor at I²C
+address `0x44`. The SHT45 protocol is simple: write a one-byte command
+(`0xFD` for a high-precision measurement), wait ~10 ms for conversion,
+then read 6 bytes back (2 bytes temp + 1 CRC + 2 bytes humidity + 1 CRC).
+This is two separate I²C transactions with a sleep between them — not a
+combined write-read with a RESTART. The code examples implement this
+sequence and log the raw bytes.
+
+---
+
+### `src/hard_way.rs` — the seeded bug
+
+**The bug: a helper function returns a dangling pointer.**
+
+```rust
+// Copyright (c) 2026 Linaro, LTD
+// SPDX-License-Identifier: Apache-2.0
+
+//! Hard-way I²C: raw zephyr-sys bindings.
+//!
+//! This file has a subtle memory-safety bug. Find it.
+
+use zephyr::raw;
+
+const SENSOR_ADDR: u16 = 0x44;
+
+/// Returns a pointer to the SHT45 measurement command byte.
+///
+/// Called just before the I²C write.
+fn measure_cmd_ptr() -> *const u8 {
+    let cmd = [0xFDu8];  // high-precision measurement command
+    cmd.as_ptr()         // BUG: cmd is dropped at end of this function;
+                         //      the returned pointer is immediately dangling.
+}
+
+pub fn read_sensor(dev: *const raw::device) {
+    // Trigger a high-precision measurement.
+    //
+    // Note: `unsafe` here signals that *this call* has been audited.
+    // It says nothing about the validity of the pointer argument.
+    let ptr = measure_cmd_ptr();
+    unsafe { raw::zr_i2c_write(dev, ptr, 1, SENSOR_ADDR) };
+
+    // Wait for the sensor to complete its measurement (~10 ms).
+    unsafe { raw::k_msleep(10) };
+
+    // Read the result: 2 bytes temp, 1 CRC, 2 bytes humidity, 1 CRC.
+    let mut buf = [0u8; 6];
+    unsafe { raw::zr_i2c_read(dev, buf.as_mut_ptr(), 6, SENSOR_ADDR) };
+
+    // Use zephyr::printkln! for output even in the hard-way version.
+    // raw::printk is a variadic C function that bindgen cannot expose in a
+    // callable form from stable Rust, so it is not in the zephyr-sys
+    // allowlist.  printkln! is available to any crate depending on `zephyr`
+    // and is intentionally not hidden here — the dangerous part of the
+    // hard-way path is the device-pointer handling, not the output.
+    zephyr::printkln!("raw: {:02x} {:02x} {:02x} {:02x}",
+        buf[0], buf[1], buf[3], buf[4]);
+}
+```
+
+**Why the `unsafe` block didn't catch it:** the dangling pointer is
+created in the *safe* function `measure_cmd_ptr()`. Nothing about that
+function is syntactically unsafe — it takes no raw pointers in, it just
+constructs a local array and extracts a pointer to it. The caller's
+`unsafe` block audits the `zr_i2c_write` call itself; it cannot see
+through the opaque `*const u8` to check where that pointer came from.
+The borrow checker stops tracking provenance the moment a reference is
+cast to a raw pointer.
+
+**Why code review misses it:** `measure_cmd_ptr()` looks like a
+reasonable abstraction — a function that returns "the command to send."
+Its return type `*const u8` is unremarkable in a codebase that passes
+raw pointers everywhere. The caller's `unsafe` block provides a false
+sense of local correctness: "I checked that `zr_i2c_write` is safe to
+call here," which is true — except for the argument it was handed.
+
+**In safe Rust this is impossible:** `fn foo() -> &u8 { let x = 0u8; &x }`
+is a compile error ("returns a reference to data owned by the current
+function"). The raw pointer version of the same mistake compiles without
+warning.
+
+---
+
+### `src/better_way.rs` — the safe version
+
+```rust
+// Copyright (c) 2026 Linaro, LTD
+// SPDX-License-Identifier: Apache-2.0
+
+//! Better-way I²C: typed safe bindings.
+
+use zephyr::device::i2c::I2c;
+use zephyr::time::{sleep, Duration};
+use log::info;
+
+const SENSOR_ADDR: u16 = 0x44;
+
+pub fn read_sensor(i2c: &mut I2c) {
+    // Trigger a high-precision measurement.
+    i2c.write(SENSOR_ADDR, &[0xFDu8]).expect("i2c write failed");
+
+    // Wait for conversion.
+    sleep(Duration::millis_at_least(10));
+
+    // Read 6 bytes: temp (2) + CRC + humidity (2) + CRC.
+    let mut buf = [0u8; 6];
+    i2c.read(SENSOR_ADDR, &mut buf).expect("i2c read failed");
+
+    info!("raw: {:02x} {:02x} {:02x} {:02x}", buf[0], buf[1], buf[3], buf[4]);
+}
+```
+
+**`src/lib.rs` wiring both together** (ships as the exercise entry point):
+
+```rust
+// Copyright (c) 2026 Linaro, LTD
+// SPDX-License-Identifier: Apache-2.0
+
+#![no_std]
+#![allow(unexpected_cfgs)]
+
+mod hard_way;
+mod better_way;
+
+#[no_mangle]
+extern "C" fn rust_main() {
+    unsafe { zephyr::set_logger().unwrap(); }
+
+    // --- Better way ---
+    let mut i2c = zephyr::devicetree::aliases::i2c_bus::get_instance()
+        .expect("i2c_bus alias not found in devicetree");
+    assert!(i2c.is_ready(), "I2C bus not ready");
+    better_way::read_sensor(&mut i2c);
+
+    // --- Hard way (do not call in normal use — dangling pointer bug) ---
+    // hard_way::read_sensor(/* *const raw::device */);
+}
+```
+
+The hard-way call is commented out in `rust_main` so that the exercise
+builds and runs the better-way path. Participants can see how they would
+get the `*const device` for the hard-way version — and note that there
+is no equivalent of `is_ready()` in the raw path.
+
+---
+
+### README.md structure
+
+**Task 1 — Find the bug (10 min)**
+
+Open `src/hard_way.rs`. There is one subtle memory-safety bug seeded in
+it. Find it. Then answer:
+- Why did the `unsafe` block at the call site not catch it?
+- Why would this be easy to miss in a code review?
+- What would the compiler say if you tried to write the equivalent with
+  Rust references instead of raw pointers? (Try it: change
+  `measure_cmd_ptr` to return `&u8` instead of `*const u8`.)
+
+**Task 2 — Analyse the type system (10 min)**
+
+Open `src/better_way.rs`. For each point below, find the line(s) in the
+better-way code that enforce the invariant, and identify what the
+hard-way version was *not* enforcing:
+
+- **Wrong device class:** how does the type system prevent passing a UART
+  where an I²C controller is expected?
+- **Buffer lifetime:** how does `write` ensure the command slice is alive
+  for the duration of the call?
+- **Length / pointer mismatch:** how is the length of the buffers
+  communicated to the driver?
+- **Error handling:** what does the hard-way version do if `zr_i2c_write`
+  returns an error code? What does the better-way version do?
+- **Device availability:** what type does `get_instance()` return, and
+  what would happen if you ignored that return value?
+
+**Task 3 — Group discussion (5 min)**
+
+When is reaching for raw `zephyr-sys` actually legitimate?
+- A device class with no binding yet.
+- Exploratory / prototype work.
+- A one-off, never-reviewed internal tool.
+
+What is the minimum discipline to do it safely? (One answer: never
+extract a raw pointer from a local — always pass the slice or reference
+directly into the `unsafe` call at the same scope level where the data
+is alive.)
+
+**Success criteria:** participants can point at the exact bug in the
+hard-way file, explain why `unsafe` didn't prevent it, and name at least
+three invariants the safe API encodes in the type system.
+
+---
+
+### Stretch: run it under Renode
+
+If Renode is installed and `myra_sip_baseboard` builds cleanly:
+
+```
+west build -b myra_sip_baseboard .
+west build -t run   # launches Renode with the emulated SHT45 at 0x44
+```
+
+The Renode platform file already has `sht4x: I2C.SHT45 @ i2c1 0x44`
+wired up. The better-way version should produce live (emulated) sensor
+readings. The hard-way version's dangling-pointer bug may or may not
+manifest — that's the point. Runtime UB is not a reliable detector.
+
+Note: `west build -t run` for Renode targets launches an interactive
+Renode session, not a QEMU terminal. Exit with the Renode GUI or
+`Ctrl-C`. Do NOT use `west build -t run` in non-interactive CI without
+a timeout.
+
+---
+
+### Open decisions / code-pass verifications
+
+**Prerequisites — must be confirmed by David before starting the code pass:**
+
+- **`myra_sip_baseboard` + Rust buildability.** The board is STM32
+  Cortex-M4 (SOC_MYRA → SOC_STM32G491XX), so `RUST_SUPPORTED` should
+  be true via `CPU_CORTEX_M`, but this has not been verified end-to-end.
+  David will attempt `west build -b myra_sip_baseboard
+  modules/lang/rust/samples/hello_world` and confirm it succeeds before
+  the ex05 code pass begins. If it fails, fall back to source-analysis-
+  only: omit the board overlay, comment out the better-way call in
+  `rust_main`, and note in the README that `west build` is not required
+  for the reading tasks.
+- **Renode availability.** Renode is expected to be installed as part of
+  the Zephyr SDK. The `myra_sip_baseboard` Renode platform file already
+  has `sht4x: I2C.SHT45 @ i2c1 0x44` wired up — no extra Renode config
+  is needed. David will confirm `west build -t run` launches Renode for
+  this board before documenting it as a stretch goal.
+
+**Already confirmed from codebase inspection:**
+
+- `zr_i2c_write(dev, buf_ptr, len_u32, addr_u16)` and `zr_i2c_read`
+  exist in `zephyr-sys/wrapper.h` with the exact signatures used above.
+  ✅
+- `k_msleep` is covered by the `allowlist_function("k_.*")` wildcard
+  in `zephyr-sys/build.rs` and will be available as `raw::k_msleep`.
+  ✅
+- `raw::printk` is NOT usable — it is variadic and not in the
+  allowlist. The hard-way code uses `zephyr::printkln!` instead (see
+  code above). ✅
+- `zephyr::device::i2c::I2c` is the correct import path
+  (`zephyr/src/device/i2c.rs` exists, `write`/`read`/`is_ready` all
+  present). ✅
+- `zephyr::devicetree::aliases::i2c_bus::get_instance()` is the correct
+  pattern — the upstream i2c-controller test uses it verbatim. No
+  application-level `build.rs` is needed; the `zephyr` crate's own
+  `build.rs` calls `build_dts()`. ✅
+- The board overlay only needs the aliases block (no extra pinmux lines
+  — `myra_sip_baseboard` already has `i2c1` pinctrl configured in its
+  DTS, unlike the tiny2040 test overlay which had to add pinmux). ✅
+- The hard-way call in `rust_main` is commented out; the `hard_way`
+  module is still compiled (the bug is visible to rust-analyzer and the
+  type-experiment in Task 1 still works). Confirm it compiles cleanly
+  with it commented out. ✅ (expected — module is compiled, not called)
+- Do NOT run under Renode during the code pass (no reliable
+  non-interactive exit).
 
 ## Not in scope for this brief
 
